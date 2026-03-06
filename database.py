@@ -12,13 +12,13 @@ from decimal import Decimal, InvalidOperation
 class DatabaseManager:
     AMOUNT_PRECISION = Decimal('0.0001')
 
-    def __init__(self, db_path: str = "transaction.db", pool_size: int = None):
+    def __init__(self, db_path: str = "transaction.db", pool_size: Optional[int] = None):
         self.db_path = db_path
         self._lock = threading.RLock()
         self.logger = logging.getLogger(__name__)
         
         self.pool_size = pool_size or int(os.getenv('DB_POOL_SIZE', 5))
-        self.connection_pool = queue.Queue(maxsize=self.pool_size)
+        self.connection_pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=self.pool_size)
         self.pool_lock = threading.Lock()
         
         self.init_database()
@@ -255,8 +255,8 @@ class DatabaseManager:
 
         return existing_ids
     
-    def create_payment_form(self, form_id: str, amount: Any, currency: str, 
-                          description: str, wallet_address: str, expires_hours: int = None) -> bool:
+    def create_payment_form(self, form_id: str, amount: Any, currency: str,
+                          description: str, wallet_address: str, expires_hours: Optional[int] = None) -> bool:
         try:
             serialized_amount = self._serialize_amount(amount)
             if serialized_amount is None:
@@ -380,8 +380,8 @@ class DatabaseManager:
         return {'status': 'error', 'message': 'Max retries exceeded'}
     
     def add_transaction(self, transaction_id: str, from_address: str, to_address: str,
-                       amount: Any, currency: str, status: str, 
-                       payment_form_id: str = None, description: str = None) -> bool:
+                       amount: Any, currency: str, status: str,
+                       payment_form_id: Optional[str] = None, description: Optional[str] = None) -> bool:
         try:
             serialized_amount = self._serialize_amount(amount)
             if serialized_amount is None:

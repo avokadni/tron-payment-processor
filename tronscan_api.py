@@ -13,8 +13,8 @@ class TronScanAPI:
     MAX_TOKEN_DECIMALS = 30
     TRX_DECIMALS = 6
 
-    def __init__(self, api_url: str = "https://apilist.tronscanapi.com/api", 
-                 requests_per_minute: int = None):
+    def __init__(self, api_url: str = "https://apilist.tronscanapi.com/api",
+                 requests_per_minute: Optional[int] = None):
         
         self.logger = logging.getLogger(__name__)
         
@@ -39,12 +39,12 @@ class TronScanAPI:
         })
         
         self.requests_per_minute = requests_per_minute or int(os.getenv('API_REQUESTS_PER_MINUTE', 20))
-        self.request_times = []
+        self.request_times: List[float] = []
         self.rate_limit_lock = Lock()
         self.min_request_interval = 60.0 / self.requests_per_minute
-        self.last_429_time = 0
+        self.last_429_time: float = 0.0
         self.backoff_multiplier = 1
-        self._response_cache = {}
+        self._response_cache: Dict[str, tuple[List[Dict[str, Any]], float]] = {}
         self._cache_lock = Lock()
         self._cache_ttl = int(os.getenv('API_CACHE_TTL_SECONDS', 30))
 
@@ -138,11 +138,12 @@ class TronScanAPI:
     def _validate_ssl_certificate(self, hostname: str) -> bool:
         return True
     
-    def _make_request(self, url: str, params: dict = None, timeout: int = 5, max_retries: int = 3) -> requests.Response:
+    def _make_request(self, url: str, params: Optional[Dict[str, Any]] = None,
+                      timeout: int = 5, max_retries: int = 3) -> requests.Response:
         if not url.startswith(self.api_url):
             raise ValueError(f"Подозрительный URL запроса: {url}")
         
-        last_exception = None
+        last_exception: Optional[requests.exceptions.RequestException] = None
         
         for attempt in range(max_retries):
             try:
@@ -213,7 +214,7 @@ class TronScanAPI:
         else:
             raise requests.exceptions.RequestException(f"Не удалось выполнить запрос после {max_retries} попыток")
     
-    def _validate_api_response(self, response_data: dict, expected_fields: list = None) -> bool:
+    def _validate_api_response(self, response_data: Dict[str, Any], expected_fields: Optional[List[str]] = None) -> bool:
         if not isinstance(response_data, dict):
             self.logger.error("API ответ не является словарем")
             return False
@@ -432,7 +433,7 @@ class TronScanAPI:
             self.logger.error(f"Неожиданная ошибка при получении информации об аккаунте {address}: {e}")
             return None
     
-    def check_recent_transactions(self, wallet_address: str, since_timestamp: int = None) -> List[Dict]:
+    def check_recent_transactions(self, wallet_address: str, since_timestamp: Optional[int] = None) -> List[Dict]:
         if since_timestamp is None:
             since_timestamp = int((datetime.now() - timedelta(hours=2)).timestamp() * 1000)
         

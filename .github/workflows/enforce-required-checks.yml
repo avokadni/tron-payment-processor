@@ -14,8 +14,27 @@ permissions:
   contents: read
 
 jobs:
+  check-token:
+    name: check-admin-token
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.detect.outputs.has_token }}
+    steps:
+      - name: Detect GH_ADMIN_TOKEN
+        id: detect
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+        run: |
+          if [ -n "${GH_ADMIN_TOKEN}" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+          fi
+
   enforce-main-branch-protection:
     name: enforce-required-checks
+    needs: check-token
+    if: needs.check-token.outputs.has_token == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -30,3 +49,14 @@ jobs:
         run: |
           chmod +x scripts/enforce_branch_protection.sh
           scripts/enforce_branch_protection.sh
+
+  skip-without-token:
+    name: skip-without-admin-token
+    needs: check-token
+    if: needs.check-token.outputs.has_token != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain Skip
+        run: |
+          echo "GH_ADMIN_TOKEN is not configured. Skipping branch protection enforcement."
+          echo "Add repository secret GH_ADMIN_TOKEN and run this workflow manually to apply protection."

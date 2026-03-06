@@ -5,11 +5,14 @@ import time
 import logging
 import re
 from PIL import Image
-from typing import Optional
+from typing import Optional, Tuple
 
 class QRCodeGenerator:
-    def __init__(self, qr_codes_dir: str = None):
-        self.qr_codes_dir = qr_codes_dir or os.getenv('QR_CODES_DIR', 'qr_codes')
+    def __init__(self, qr_codes_dir: Optional[str] = None):
+        resolved_qr_dir = qr_codes_dir if qr_codes_dir else os.getenv('QR_CODES_DIR')
+        if not resolved_qr_dir:
+            resolved_qr_dir = 'qr_codes'
+        self.qr_codes_dir: str = resolved_qr_dir
         os.makedirs(self.qr_codes_dir, exist_ok=True)
         self.logger = logging.getLogger(__name__)
         
@@ -20,7 +23,7 @@ class QRCodeGenerator:
             border=int(os.getenv('QR_BORDER', 4)),
         )
     
-    def generate_qr_code(self, data: str, size: tuple = None) -> Optional[bytes]:
+    def generate_qr_code(self, data: str, size: Optional[Tuple[int, int]] = None) -> Optional[bytes]:
         try:
             if size is None:
                 default_size = int(os.getenv('QR_DEFAULT_SIZE', 300))
@@ -38,14 +41,14 @@ class QRCodeGenerator:
             
             img_byte_arr = io.BytesIO()
             img.save(img_byte_arr, format='PNG')
-            img_byte_arr = img_byte_arr.getvalue()
+            qr_bytes = img_byte_arr.getvalue()
             
-            return img_byte_arr
+            return qr_bytes
         except Exception as e:
             self.logger.error(f"Ошибка при генерации QR-кода: {e}")
             return None
     
-    def generate_qr_code_file(self, data: str, filename: str, size: tuple = None) -> bool:
+    def generate_qr_code_file(self, data: str, filename: str, size: Optional[Tuple[int, int]] = None) -> bool:
         try:
             if not self._validate_filename(filename):
                 self.logger.error(f"Недопустимое имя файла: {filename}")
@@ -81,7 +84,8 @@ class QRCodeGenerator:
             self.logger.error(f"Ошибка при сохранении QR-кода: {e}")
             return False
     
-    def generate_qr_code_in_folder(self, data: str, filename: str = None, size: tuple = None) -> Optional[str]:
+    def generate_qr_code_in_folder(self, data: str, filename: Optional[str] = None,
+                                   size: Optional[Tuple[int, int]] = None) -> Optional[str]:
         try:
             if filename is None:
                 filename = f"qr_{int(time.time())}.png"

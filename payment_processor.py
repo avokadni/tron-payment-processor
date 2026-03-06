@@ -11,7 +11,7 @@ import collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ipaddress
 from datetime import datetime, timedelta
-from typing import Dict, Optional, Callable, List, Any
+from typing import Dict, Optional, Callable, List, Any, Set, Deque, DefaultDict, Tuple
 from decimal import Decimal, InvalidOperation
 from dotenv import load_dotenv
 
@@ -23,12 +23,12 @@ load_dotenv()
 BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 BASE58_MAP = {char: index for index, char in enumerate(BASE58_ALPHABET)}
 
-def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0, 
-                    exceptions: tuple = (Exception,)):
+def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 2.0,
+                    exceptions: tuple[type[BaseException], ...] = (Exception,)):
     def decorator(func):
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            last_exception = None
+            last_exception: Optional[BaseException] = None
             current_delay = delay
             
             for attempt in range(max_retries + 1):
@@ -49,7 +49,9 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 
                     time.sleep(current_delay)
                     current_delay *= backoff
                     
-            raise last_exception
+            if last_exception is not None:
+                raise last_exception
+            raise RuntimeError("retry_on_failure: unexpected state without captured exception")
         return wrapper
     return decorator
 
@@ -60,7 +62,7 @@ class PaymentProcessor:
     MAX_TOKEN_DECIMALS = 30
     MONITOR_LAST_BLOCK_STATE_KEY = "monitor.last_block_timestamp"
     
-    def __init__(self, log_level: str = None):
+    def __init__(self, log_level: Optional[str] = None):
         self.logger = logging.getLogger(__name__)
         if log_level is None:
             log_level = os.getenv('LOG_LEVEL', 'INFO')
@@ -83,23 +85,23 @@ class PaymentProcessor:
                 os.getenv('TRONSCAN_API_URL', 'https://apilist.tronscanapi.com/api'),
                 requests_per_minute=api_rate_limit
             )
-            self.wallet_address = os.getenv('WALLET_ADDRESS')
-            
-            if not self.wallet_address:
+            wallet_address = os.getenv('WALLET_ADDRESS')
+            if not wallet_address:
                 raise ValueError("WALLET_ADDRESS не указан в .env файле")
+            self.wallet_address: str = wallet_address
             
             self.monitoring = False
-            self.monitor_thread = None
-            self.payment_callbacks = {}
+            self.monitor_thread: Optional[threading.Thread] = None
+            self.payment_callbacks: Dict[str, Callable[..., Any]] = {}
             self._form_creation_lock = threading.Lock()
-            self._last_form_creation_time = 0
-            self._processing_transactions = set()
+            self._last_form_creation_time: float = 0.0
+            self._processing_transactions: Set[str] = set()
             self._transaction_cache_lock = threading.Lock()
             self._last_block_timestamp = self._load_last_block_timestamp()
-            self._form_cache = {}
+            self._form_cache: Dict[str, Tuple[Any, float]] = {}
             self._form_cache_lock = threading.Lock()
             self._cache_expiry = int(os.getenv('CACHE_EXPIRY_SECONDS', 300))
-            self._api_cache = {}
+            self._api_cache: Dict[str, Tuple[List[Decimal], float]] = {}
             self._api_cache_lock = threading.Lock()
             self._api_cache_ttl = int(os.getenv('API_CACHE_TTL_SECONDS', 30))
             
@@ -107,10 +109,10 @@ class PaymentProcessor:
             self._transaction_processing_lock = threading.RLock()
             self._form_status_lock = threading.RLock()
 
-            self._user_form_counts = {}
+            self._user_form_counts: Dict[str, int] = {}
             self._user_form_lock = threading.Lock()
-            self._user_last_form_time = {}
-            self._user_form_timestamps = collections.defaultdict(collections.deque)
+            self._user_last_form_time: Dict[str, float] = {}
+            self._user_form_timestamps: DefaultDict[str, Deque[float]] = collections.defaultdict(collections.deque)
             self._user_rate_limit_lock = threading.Lock()
             self._max_user_counters = int(os.getenv('MAX_USER_COUNTERS', 10000))
             
@@ -445,7 +447,7 @@ class PaymentProcessor:
         data = f"{form_id}:{amount}:{currency}:{datetime.now().isoformat()}"
         return hashlib.sha256(data.encode()).hexdigest()[:16]
     
-    def _check_form_creation_limits(self, client_ip: str = None, user_id: str = None):
+    def _check_form_creation_limits(self, client_ip: Optional[str] = None, user_id: Optional[str] = None):
         try:
             current_time = time.time()
             
@@ -616,8 +618,8 @@ class PaymentProcessor:
             self.logger.error(f"Ошибка при получении сумм из блокчейна: {e}")
             return []
     
-    def _generate_unique_amount(self, base_amount: Decimal, currency: str, max_attempts: int = 100, 
-                              max_total_amount: Decimal = None) -> Decimal:
+    def _generate_unique_amount(self, base_amount: Decimal, currency: str, max_attempts: int = 100,
+                              max_total_amount: Optional[Decimal] = None) -> Decimal:
         recent_amounts = self._get_recent_transaction_amounts(currency)
         hours_back = int(os.getenv('UNIQUE_AMOUNT_CHECK_HOURS', 2))
         blockchain_amounts = self._get_blockchain_transaction_amounts(currency, hours_back=hours_back)
@@ -675,8 +677,8 @@ class PaymentProcessor:
             return True
     
     def create_payment_form(self, amount: Any, currency: str = "TRX", 
-                          description: str = "", expires_hours: int = None, 
-                          client_ip: str = None, user_id: str = None) -> Dict:
+                          description: str = "", expires_hours: Optional[int] = None,
+                          client_ip: Optional[str] = None, user_id: Optional[str] = None) -> Dict:
         
         amount_decimal = self._to_decimal(amount)
         if amount_decimal is None:
@@ -848,12 +850,13 @@ class PaymentProcessor:
             return
         
         self.monitoring = True
-        self.monitor_thread = threading.Thread(
+        monitor_thread = threading.Thread(
             target=self._monitor_payments,
             args=(check_interval,),
             daemon=True
         )
-        self.monitor_thread.start()
+        self.monitor_thread = monitor_thread
+        monitor_thread.start()
         self.logger.info("Мониторинг платежей запущен")
     
     def stop_monitoring(self):
@@ -1309,7 +1312,7 @@ class PaymentProcessor:
         if form_id in self.payment_callbacks:
             del self.payment_callbacks[form_id]
     
-    def get_transaction_history(self, form_id: str = None) -> list:
+    def get_transaction_history(self, form_id: Optional[str] = None) -> list:
         if form_id:
             return self.db.get_transactions_by_form(form_id)
         else:
