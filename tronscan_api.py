@@ -2,13 +2,17 @@ import requests
 import time
 import logging
 from urllib.parse import urlparse
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from datetime import datetime, timedelta
 from threading import Lock
 import urllib3
 import os
+from decimal import Decimal, InvalidOperation
 
 class TronScanAPI:
+    MAX_TOKEN_DECIMALS = 30
+    TRX_DECIMALS = 6
+
     def __init__(self, api_url: str = "https://apilist.tronscanapi.com/api", 
                  requests_per_minute: int = None):
         
@@ -43,6 +47,28 @@ class TronScanAPI:
         self._response_cache = {}
         self._cache_lock = Lock()
         self._cache_ttl = int(os.getenv('API_CACHE_TTL_SECONDS', 30))
+
+    def _to_decimal(self, value: Any) -> Optional[Decimal]:
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, bool):
+            return None
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        if not amount.is_finite():
+            return None
+        return amount
+
+    def _parse_token_decimals(self, value: Any, default: int = 6) -> Optional[int]:
+        try:
+            decimals = int(value)
+        except (ValueError, TypeError):
+            decimals = default
+        if decimals < 0 or decimals > self.MAX_TOKEN_DECIMALS:
+            return None
+        return decimals
     
     def _validate_api_url(self, url: str) -> bool:
         allowed_domains = [
@@ -457,14 +483,11 @@ class TronScanAPI:
                 
                 token_info = transfer.get('tokenInfo', {})
                 symbol = token_info.get('tokenAbbr', 'UNKNOWN')
-                decimals = token_info.get('tokenDecimal', 6)
-                
-                try:
-                    amount = float(amount_str)
-                    if decimals > 0:
-                        amount = amount / (10 ** decimals)
-                except (ValueError, TypeError, ZeroDivisionError):
-                    amount = 0.0
+                decimals = self._parse_token_decimals(token_info.get('tokenDecimal', 6), default=6)
+                raw_amount = self._to_decimal(amount_str)
+                if decimals is None or raw_amount is None:
+                    return None
+                amount = raw_amount / (Decimal(10) ** decimals) if decimals > 0 else raw_amount
                 
                 self.logger.debug(f"🪙 TRC20 перевод: {amount} {symbol} от {from_addr[:8]}...{from_addr[-4:]} к {to_addr[:8]}...{to_addr[-4:]}")
                 
@@ -491,7 +514,10 @@ class TronScanAPI:
             if not transfers:
                 contract_data = tx_details.get('contractData', {})
                 if contract_data:
-                    amount = contract_data.get('amount', 0) / 1000000
+                    raw_amount = self._to_decimal(contract_data.get('amount', 0))
+                    if raw_amount is None:
+                        return None
+                    amount = raw_amount / (Decimal(10) ** self.TRX_DECIMALS)
                     from_addr = contract_data.get('owner_address', '')
                     to_addr = contract_data.get('to_address', '')
                     
@@ -508,15 +534,16 @@ class TronScanAPI:
                     }
             else:
                 for i, transfer in enumerate(transfers):
-                    amount = float(transfer.get('amount_str', 0))
+                    raw_amount = self._to_decimal(transfer.get('amount_str', 0))
                     from_addr = transfer.get('from_address', '')
                     to_addr = transfer.get('to_address', '')
                     token_info = transfer.get('tokenInfo', {})
                     symbol = token_info.get('symbol', 'UNKNOWN')
-                    decimals = token_info.get('decimals', 6)
+                    decimals = self._parse_token_decimals(token_info.get('decimals', 6), default=6)
                     
-                    if decimals > 0:
-                        amount = amount / (10 ** decimals)
+                    if raw_amount is None or decimals is None:
+                        continue
+                    amount = raw_amount / (Decimal(10) ** decimals) if decimals > 0 else raw_amount
                     
                     self.logger.debug(f"🪙 TRC20 перевод #{i+1}: {amount} {symbol} от {from_addr[:8]}...{from_addr[-4:]} к {to_addr[:8]}...{to_addr[-4:]}")
                     

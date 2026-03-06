@@ -1,5 +1,6 @@
 import os
 import time
+from decimal import Decimal
 from dotenv import load_dotenv
 from payment_processor import PaymentProcessor
 from qr_generator import QRCodeGenerator
@@ -18,14 +19,14 @@ def main():
         
         print("\n💳 Создание тестовой платежной формы...")
         payment_form = payment_processor.create_payment_form(
-            amount=1.0,
+            amount=Decimal('1.0'),
             currency="USDT",
             description="Тестовый платеж"
         )
         
         print(f"✅ Платежная форма создана:")
         print(f"   ID: {payment_form['form_id']}")
-        print(f"   Запрошенная сумма: {payment_form.get('original_amount', 1.0)} {payment_form['currency']}")
+        print(f"   Запрошенная сумма: {payment_form.get('original_amount', Decimal('1.0'))} {payment_form['currency']}")
         print(f"   К доплате: {payment_form['amount']} {payment_form['currency']}")
         print(f"   Описание: {payment_form['description']}")
         print(f"   Действительна до: {payment_form['expires_at']}")

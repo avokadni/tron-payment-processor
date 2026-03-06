@@ -6,9 +6,12 @@ import queue
 import contextlib
 import time
 from datetime import datetime
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+from decimal import Decimal, InvalidOperation
 
 class DatabaseManager:
+    AMOUNT_PRECISION = Decimal('0.0001')
+
     def __init__(self, db_path: str = "transaction.db", pool_size: int = None):
         self.db_path = db_path
         self._lock = threading.RLock()
@@ -41,6 +44,34 @@ class DatabaseManager:
         conn.execute(f'PRAGMA mmap_size={os.getenv("DB_MMAP_SIZE", 268435456)}')
         
         return conn
+
+    def _to_decimal(self, value) -> Optional[Decimal]:
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, bool):
+            return None
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        if not amount.is_finite():
+            return None
+        return amount
+
+    def _serialize_amount(self, value) -> Optional[str]:
+        amount = self._to_decimal(value)
+        if amount is None:
+            return None
+        try:
+            return format(amount.quantize(self.AMOUNT_PRECISION), 'f')
+        except (InvalidOperation, ValueError):
+            return None
+
+    def _convert_amount_fields(self, data: Dict) -> Dict:
+        if 'amount' in data:
+            amount = self._to_decimal(data['amount'])
+            data['amount'] = amount
+        return data
     
     @contextlib.contextmanager
     def get_connection(self):
@@ -137,9 +168,14 @@ class DatabaseManager:
             
             conn.commit()
     
-    def create_payment_form(self, form_id: str, amount: float, currency: str, 
+    def create_payment_form(self, form_id: str, amount: Any, currency: str, 
                           description: str, wallet_address: str, expires_hours: int = None) -> bool:
         try:
+            serialized_amount = self._serialize_amount(amount)
+            if serialized_amount is None:
+                self.logger.error(f"Некорректная сумма при создании формы: {amount}")
+                return False
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -151,7 +187,7 @@ class DatabaseManager:
                     INSERT INTO payment_forms 
                     (form_id, amount, currency, description, status, expires_at, wallet_address)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (form_id, amount, currency, description, 'pending', expires_at, wallet_address))
+                ''', (form_id, serialized_amount, currency, description, 'pending', expires_at, wallet_address))
                 
                 conn.commit()
                 return True
@@ -173,12 +209,19 @@ class DatabaseManager:
             
             if row:
                 columns = [description[0] for description in cursor.description]
-                return dict(zip(columns, row))
+                return self._convert_amount_fields(dict(zip(columns, row)))
             
             return None
     
     def process_payment_atomic(self, transaction_id: str, from_address: str, to_address: str,
-                              amount: float, currency: str, form_id: str) -> Dict[str, str]:
+                              amount: Any, currency: str, form_id: str) -> Dict[str, str]:
+        amount_decimal = self._to_decimal(amount)
+        if amount_decimal is None:
+            return {'status': 'error', 'message': 'Invalid amount format'}
+        serialized_amount = self._serialize_amount(amount_decimal)
+        if serialized_amount is None:
+            return {'status': 'error', 'message': 'Invalid amount format'}
+
         max_retries = 3
         for attempt in range(max_retries):
             with self._lock:
@@ -205,12 +248,16 @@ class DatabaseManager:
                             return {'status': 'error', 'message': 'Payment form not found or not pending'}
                         
                         form_status, expires_at, expected_amount, expected_currency = form_row
+                        expected_amount_decimal = self._to_decimal(expected_amount)
+                        if expected_amount_decimal is None:
+                            conn.rollback()
+                            return {'status': 'error', 'message': 'Invalid amount in payment form'}
                         
                         if datetime.now().timestamp() > expires_at:
                             conn.rollback()
                             return {'status': 'error', 'message': 'Payment form expired'}
                         
-                        if abs(amount - expected_amount) > 0.0001 or currency != expected_currency:
+                        if abs(amount_decimal - expected_amount_decimal) > self.AMOUNT_PRECISION or currency != expected_currency:
                             conn.rollback()
                             return {'status': 'error', 'message': 'Amount or currency mismatch'}
                         
@@ -218,7 +265,7 @@ class DatabaseManager:
                             INSERT INTO transactions 
                             (transaction_id, from_address, to_address, amount, currency, status, payment_form_id)
                             VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ''', (transaction_id, from_address, to_address, amount, currency, 'confirmed', form_id))
+                        ''', (transaction_id, from_address, to_address, serialized_amount, currency, 'confirmed', form_id))
                         
                         cursor.execute('''
                             UPDATE payment_forms 
@@ -246,9 +293,14 @@ class DatabaseManager:
         return {'status': 'error', 'message': 'Max retries exceeded'}
     
     def add_transaction(self, transaction_id: str, from_address: str, to_address: str,
-                       amount: float, currency: str, status: str, 
+                       amount: Any, currency: str, status: str, 
                        payment_form_id: str = None, description: str = None) -> bool:
         try:
+            serialized_amount = self._serialize_amount(amount)
+            if serialized_amount is None:
+                self.logger.error(f"Некорректная сумма при добавлении транзакции: {amount}")
+                return False
+
             with self.get_connection() as conn:
                 cursor = conn.cursor()
                 
@@ -256,7 +308,7 @@ class DatabaseManager:
                     INSERT INTO transactions 
                     (transaction_id, from_address, to_address, amount, currency, status, payment_form_id, description)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (transaction_id, from_address, to_address, amount, currency, status, payment_form_id, description))
+                ''', (transaction_id, from_address, to_address, serialized_amount, currency, status, payment_form_id, description))
                 
                 conn.commit()
                 return True
@@ -277,7 +329,7 @@ class DatabaseManager:
             rows = cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             
-            return [dict(zip(columns, row)) for row in rows]
+            return [self._convert_amount_fields(dict(zip(columns, row))) for row in rows]
     
     def get_transaction_by_id(self, transaction_id: str) -> Optional[Dict]:
         with self.get_connection() as conn:
@@ -322,7 +374,7 @@ class DatabaseManager:
             rows = cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             
-            return [dict(zip(columns, row)) for row in rows]
+            return [self._convert_amount_fields(dict(zip(columns, row))) for row in rows]
     
     def get_active_payment_forms(self, current_time: float) -> List[Dict]:
         with self.get_connection() as conn:
@@ -337,7 +389,7 @@ class DatabaseManager:
             rows = cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             
-            return [dict(zip(columns, row)) for row in rows]
+            return [self._convert_amount_fields(dict(zip(columns, row))) for row in rows]
     
     def expire_old_forms(self, current_time: float) -> int:
         with self.get_connection() as conn:
@@ -366,7 +418,7 @@ class DatabaseManager:
             rows = cursor.fetchall()
             columns = [description[0] for description in cursor.description]
             
-            return [dict(zip(columns, row)) for row in rows]
+            return [self._convert_amount_fields(dict(zip(columns, row))) for row in rows]
     
     def close_pool(self):
         while not self.connection_pool.empty():

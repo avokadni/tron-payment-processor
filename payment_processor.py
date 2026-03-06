@@ -2,18 +2,17 @@ import os
 import uuid
 import threading
 import time
-import random
 import secrets
 import logging
 import hashlib
 import re
 import functools
-import math
 import collections
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ipaddress
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Callable, List, Any
+from decimal import Decimal, InvalidOperation
 from dotenv import load_dotenv
 
 from database import DatabaseManager
@@ -56,6 +55,9 @@ def retry_on_failure(max_retries: int = 3, delay: float = 1.0, backoff: float = 
 
 class PaymentProcessor:
     OFFICIAL_USDT_CONTRACT = "TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t"
+    AMOUNT_PRECISION = Decimal('0.0001')
+    AMOUNT_SIMILARITY_THRESHOLD = Decimal('0.01')
+    MAX_TOKEN_DECIMALS = 30
     
     def __init__(self, log_level: str = None):
         self.logger = logging.getLogger(__name__)
@@ -129,8 +131,28 @@ class PaymentProcessor:
             return "****"
         return f"{address[:4]}...{address[-4:]}"
     
-    def _mask_amount(self, amount: float) -> str:
+    def _mask_amount(self, amount: Any) -> str:
         return "***.**"
+
+    def _to_decimal(self, value: Any) -> Optional[Decimal]:
+        if isinstance(value, Decimal):
+            return value
+        if isinstance(value, bool):
+            return None
+        try:
+            amount = Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
+        if not amount.is_finite():
+            return None
+        return amount
+
+    def _decimal_from_env(self, key: str, default: str) -> Decimal:
+        raw_value = os.getenv(key, default)
+        value = self._to_decimal(raw_value)
+        if value is None:
+            raise ValueError(f"Некорректное значение {key}: {raw_value}")
+        return value
     
     def _validate_env_vars(self):
         wallet = os.getenv('WALLET_ADDRESS')
@@ -238,49 +260,41 @@ class PaymentProcessor:
         except Exception:
             return None
     
-    def _validate_amount(self, amount: float, currency: str) -> bool:
-        if not isinstance(amount, (int, float)):
-            return False
-            
+    def _validate_amount(self, amount: Any, currency: str) -> bool:
         if not isinstance(currency, str) or not currency.strip():
             return False
         
-        try:
-            if math.isnan(amount):
-                return False
-        except (TypeError, ValueError):
-            return False
-            
-        if amount == float('inf') or amount == float('-inf'):
+        amount_decimal = self._to_decimal(amount)
+        if amount_decimal is None:
             return False
         
-        if amount <= 0:
+        if amount_decimal <= 0:
             return False
         
-        max_amount_limit = float(os.getenv('MAX_AMOUNT_LIMIT', 1e15))
-        if amount > max_amount_limit:
+        max_amount_limit = self._decimal_from_env('MAX_AMOUNT_LIMIT', '1000000000000000')
+        if amount_decimal > max_amount_limit:
             return False
         
-        if amount != round(amount, 4):
-            self.logger.warning(f"Сумма имеет слишком высокую точность: {amount}")
+        if amount_decimal != amount_decimal.quantize(self.AMOUNT_PRECISION):
+            self.logger.warning(f"Сумма имеет слишком высокую точность: {amount_decimal}")
             return False
         
         min_limits = {
-            'USDT': float(os.getenv('MIN_USDT_AMOUNT', 0.1)),
-            'TRX': float(os.getenv('MIN_TRX_AMOUNT', 1.0))
+            'USDT': self._decimal_from_env('MIN_USDT_AMOUNT', '0.1'),
+            'TRX': self._decimal_from_env('MIN_TRX_AMOUNT', '1.0')
         }
         
         max_limits = {
-            'USDT': float(os.getenv('MAX_USDT_AMOUNT', 10000.0)),
-            'TRX': float(os.getenv('MAX_TRX_AMOUNT', 100000.0))
+            'USDT': self._decimal_from_env('MAX_USDT_AMOUNT', '10000.0'),
+            'TRX': self._decimal_from_env('MAX_TRX_AMOUNT', '100000.0')
         }
         
-        if currency in min_limits and amount < min_limits[currency]:
-            self.logger.warning(f"Сумма ниже минимального лимита для {currency}: {amount}")
+        if currency in min_limits and amount_decimal < min_limits[currency]:
+            self.logger.warning(f"Сумма ниже минимального лимита для {currency}: {amount_decimal}")
             return False
         
-        if currency in max_limits and amount > max_limits[currency]:
-            self.logger.warning(f"Превышен лимит для {currency}: {amount}")
+        if currency in max_limits and amount_decimal > max_limits[currency]:
+            self.logger.warning(f"Превышен лимит для {currency}: {amount_decimal}")
             return False
         
         return True
@@ -407,7 +421,7 @@ class PaymentProcessor:
             self.logger.error(f"Ошибка при проверке USDT контракта: {e}")
             return False
     
-    def _generate_payment_hash(self, form_id: str, amount: float, currency: str) -> str:
+    def _generate_payment_hash(self, form_id: str, amount: Decimal, currency: str) -> str:
         data = f"{form_id}:{amount}:{currency}:{datetime.now().isoformat()}"
         return hashlib.sha256(data.encode()).hexdigest()[:16]
     
@@ -499,30 +513,34 @@ class PaymentProcessor:
         except Exception as e:
             self.logger.error(f"Ошибка при очистке счетчиков пользователей: {e}")
     
-    def _get_recent_transaction_amounts(self, currency: str) -> List[float]:
+    def _get_recent_transaction_amounts(self, currency: str) -> List[Decimal]:
         try:
             current_time = datetime.now().timestamp()
             active_forms = self.db.get_active_payment_forms(current_time)
             recent_txs = self.db.get_pending_transactions()
             
-            amounts = []
+            amounts: List[Decimal] = []
             
             for form in active_forms:
                 if form['currency'] == currency:
-                    amounts.append(form['amount'])
+                    form_amount = self._to_decimal(form.get('amount'))
+                    if form_amount is not None:
+                        amounts.append(form_amount)
             
             for tx in recent_txs:
                 if tx['currency'] == currency:
-                    amounts.append(tx['amount'])
-                    if len(amounts) >= 20:
-                        break
+                    tx_amount = self._to_decimal(tx.get('amount'))
+                    if tx_amount is not None:
+                        amounts.append(tx_amount)
+                        if len(amounts) >= 20:
+                            break
             
             return amounts
         except Exception as e:
             self.logger.error(f"Ошибка при получении сумм активных форм и транзакций: {e}")
             return []
     
-    def _get_blockchain_transaction_amounts(self, currency: str, hours_back: int = 1) -> List[float]:
+    def _get_blockchain_transaction_amounts(self, currency: str, hours_back: int = 1) -> List[Decimal]:
         cache_key = f"blockchain_amounts_{currency}_{hours_back}"
         current_time = time.time()
         
@@ -543,7 +561,7 @@ class PaymentProcessor:
                 start=0
             )
             
-            amounts = []
+            amounts: List[Decimal] = []
             for tx in blockchain_txs:
                 tx_timestamp = tx.get('timestamp', 0)
                 if tx_timestamp < since_timestamp:
@@ -552,9 +570,11 @@ class PaymentProcessor:
                 parsed_tx = self.tronscan.parse_transaction(tx)
                 if parsed_tx and parsed_tx['currency'] == currency:
                     if parsed_tx['to_address'].lower() == self.wallet_address.lower():
-                        amounts.append(parsed_tx['amount'])
-                        if len(amounts) >= 20:
-                            break
+                        parsed_amount = self._to_decimal(parsed_tx.get('amount'))
+                        if parsed_amount is not None:
+                            amounts.append(parsed_amount)
+                            if len(amounts) >= 20:
+                                break
             
             with self._api_cache_lock:
                 self._api_cache[cache_key] = (amounts, current_time)
@@ -576,8 +596,8 @@ class PaymentProcessor:
             self.logger.error(f"Ошибка при получении сумм из блокчейна: {e}")
             return []
     
-    def _generate_unique_amount(self, base_amount: float, currency: str, max_attempts: int = 100, 
-                              max_total_amount: float = None) -> float:
+    def _generate_unique_amount(self, base_amount: Decimal, currency: str, max_attempts: int = 100, 
+                              max_total_amount: Decimal = None) -> Decimal:
         recent_amounts = self._get_recent_transaction_amounts(currency)
         hours_back = int(os.getenv('UNIQUE_AMOUNT_CHECK_HOURS', 2))
         blockchain_amounts = self._get_blockchain_transaction_amounts(currency, hours_back=hours_back)
@@ -586,46 +606,46 @@ class PaymentProcessor:
         recent_amounts_sorted = sorted(set(all_amounts))
         
         for attempt in range(max_attempts):
-            random_addition = secrets.randbelow(9999) / 10000.0
-            if random_addition < 0.0001:
-                random_addition = 0.0001
+            random_addition = Decimal(secrets.randbelow(9999)) / Decimal('10000')
+            if random_addition < self.AMOUNT_PRECISION:
+                random_addition = self.AMOUNT_PRECISION
             
-            final_amount = round(base_amount + random_addition, 4)
+            final_amount = (base_amount + random_addition).quantize(self.AMOUNT_PRECISION)
             if max_total_amount is not None and final_amount > max_total_amount:
                 continue
             
             is_unique = True
             for recent_amount in recent_amounts_sorted:
-                if abs(final_amount - recent_amount) < 0.0001:
+                if abs(final_amount - recent_amount) < self.AMOUNT_PRECISION:
                     is_unique = False
                     break
-                if recent_amount > final_amount + 0.0001:
+                if recent_amount > final_amount + self.AMOUNT_PRECISION:
                     break
             
             if is_unique:
                 self.logger.debug(f"Сгенерирована уникальная сумма: {final_amount} (попытка {attempt + 1})")
                 return final_amount
         
-        random_suffix = random.uniform(0.0001, 0.9999)
-        final_amount = round(base_amount + random_suffix, 4)
+        random_suffix = Decimal(secrets.randbelow(9999) + 1) / Decimal('10000')
+        final_amount = (base_amount + random_suffix).quantize(self.AMOUNT_PRECISION)
         if max_total_amount is not None:
-            final_amount = min(final_amount, round(max_total_amount, 4))
+            final_amount = min(final_amount, max_total_amount.quantize(self.AMOUNT_PRECISION))
         self.logger.warning(f"Использован случайный суффикс для генерации суммы: {final_amount}")
         return final_amount
     
-    def _check_recent_transactions(self, amount: float, currency: str) -> bool:
+    def _check_recent_transactions(self, amount: Decimal, currency: str) -> bool:
         try:
             local_amounts = self._get_recent_transaction_amounts(currency)
             
             for recent_amount in local_amounts:
-                if abs(amount - recent_amount) < 0.01:
+                if abs(amount - recent_amount) < self.AMOUNT_SIMILARITY_THRESHOLD:
                     self.logger.warning(f"Сумма {amount} слишком похожа на локальную транзакцию: {recent_amount}")
                     return False
             
             blockchain_amounts = self._get_blockchain_transaction_amounts(currency)
             
             for blockchain_amount in blockchain_amounts:
-                if abs(amount - blockchain_amount) < 0.01:
+                if abs(amount - blockchain_amount) < self.AMOUNT_SIMILARITY_THRESHOLD:
                     self.logger.warning(f"Сумма {amount} слишком похожа на блокчейн транзакцию: {blockchain_amount}")
                     return False
             
@@ -634,15 +654,17 @@ class PaymentProcessor:
             self.logger.error(f"Ошибка при проверке последних транзакций: {e}")
             return True
     
-    def create_payment_form(self, amount: float, currency: str = "TRX", 
+    def create_payment_form(self, amount: Any, currency: str = "TRX", 
                           description: str = "", expires_hours: int = None, 
                           client_ip: str = None, user_id: str = None) -> Dict:
         
-        if not isinstance(amount, (int, float)):
+        amount_decimal = self._to_decimal(amount)
+        if amount_decimal is None:
             raise ValueError(f"amount должен быть числом, получен {type(amount)}")
             
         if not isinstance(currency, str):
             raise ValueError(f"currency должен быть строкой, получен {type(currency)}")
+        currency = currency.upper()
             
         if not isinstance(description, str):
             raise ValueError(f"description должен быть строкой, получен {type(description)}")
@@ -659,8 +681,8 @@ class PaymentProcessor:
         if user_id is not None and not isinstance(user_id, str):
             raise ValueError(f"user_id должен быть строкой или None, получен {type(user_id)}")
 
-        if not self._validate_amount(amount, currency):
-            raise ValueError(f"Некорректная сумма: {amount} {currency}")
+        if not self._validate_amount(amount_decimal, currency):
+            raise ValueError(f"Некорректная сумма: {amount_decimal} {currency}")
         
         if not self._validate_description(description):
             raise ValueError("Некорректное описание платежа")
@@ -676,16 +698,16 @@ class PaymentProcessor:
         
         self._check_form_creation_limits(client_ip, user_id)
         
-        if not self._check_recent_transactions(amount, currency):
+        if not self._check_recent_transactions(amount_decimal, currency):
             raise Exception("Сумма слишком похожа на недавние транзакции. Попробуйте другую сумму.")
         
         currency_max_limits = {
-            'USDT': float(os.getenv('MAX_USDT_AMOUNT', 10000.0)),
-            'TRX': float(os.getenv('MAX_TRX_AMOUNT', 100000.0))
+            'USDT': self._decimal_from_env('MAX_USDT_AMOUNT', '10000.0'),
+            'TRX': self._decimal_from_env('MAX_TRX_AMOUNT', '100000.0')
         }
-        max_total_amount = currency_max_limits.get(currency, float(os.getenv('MAX_AMOUNT_LIMIT', 1e15)))
+        max_total_amount = currency_max_limits.get(currency, self._decimal_from_env('MAX_AMOUNT_LIMIT', '1000000000000000'))
         
-        final_amount = self._generate_unique_amount(amount, currency, max_total_amount=max_total_amount)
+        final_amount = self._generate_unique_amount(amount_decimal, currency, max_total_amount=max_total_amount)
         
         if not self._validate_amount(final_amount, currency):
             raise ValueError("Не удалось сгенерировать итоговую сумму в допустимых лимитах")
@@ -706,7 +728,7 @@ class PaymentProcessor:
             return {
                 'form_id': form_id,
                 'amount': final_amount,
-                'original_amount': amount,
+                'original_amount': amount_decimal,
                 'currency': currency,
                 'description': description,
                 'wallet_address': self.wallet_address,
@@ -736,13 +758,20 @@ class PaymentProcessor:
                 self._form_cache[cache_key] = (form_data, current_time)
             
             return form_data
+
+    def _format_amount_for_uri(self, amount: Any) -> str:
+        amount_decimal = self._to_decimal(amount)
+        if amount_decimal is None:
+            return str(amount)
+        normalized_amount = amount_decimal.quantize(self.AMOUNT_PRECISION).normalize()
+        return format(normalized_amount, 'f')
     
     def generate_payment_url(self, form_id: str) -> str:
         form_data = self.get_payment_form(form_id)
         if not form_data:
             raise ValueError("Платежная форма не найдена")
         
-        amount = form_data['amount']
+        amount = self._format_amount_for_uri(form_data['amount'])
         currency = form_data['currency']
         
         if currency == "TRX":
@@ -757,7 +786,7 @@ class PaymentProcessor:
         if not form_data:
             raise ValueError("Платежная форма не найдена")
         
-        amount = form_data['amount']
+        amount = self._format_amount_for_uri(form_data['amount'])
         currency = form_data['currency']
         
         if currency == "TRX":
@@ -998,7 +1027,10 @@ class PaymentProcessor:
     
     def _check_form_against_transactions_optimized(self, form_data: Dict, transactions: List[Dict]) -> bool:
         form_id = form_data['form_id']
-        form_amount = form_data['amount']
+        form_amount = self._to_decimal(form_data.get('amount'))
+        if form_amount is None:
+            self.logger.error(f"Некорректная сумма формы {form_id}")
+            return False
         form_currency = form_data['currency']
         wallet_address_lower = self.wallet_address.lower()
         
@@ -1024,18 +1056,23 @@ class PaymentProcessor:
                     self.logger.debug(f"❌ Не удалось распарсить транзакцию {tx_hash[:16]}")
                     continue
                 
-                amount_diff = abs(parsed_tx['amount'] - form_amount)
+                tx_amount = self._to_decimal(parsed_tx.get('amount'))
+                if tx_amount is None:
+                    self.logger.debug(f"❌ Некорректная сумма в транзакции {tx_hash[:16]}")
+                    continue
+                
+                amount_diff = abs(tx_amount - form_amount)
                 currency_match = parsed_tx['currency'] == form_currency
                 address_match = parsed_tx['to_address'].lower() == wallet_address_lower
                 confirmed = parsed_tx.get('confirmed', False)
                 
                 self.logger.debug(f"🔍 Проверка транзакции {tx_hash[:16]} для формы {form_id}:")
-                self.logger.debug(f"  Сумма: {parsed_tx['amount']} vs {form_amount} (разница: {amount_diff})")
+                self.logger.debug(f"  Сумма: {tx_amount} vs {form_amount} (разница: {amount_diff})")
                 self.logger.debug(f"  Валюта: {parsed_tx['currency']} vs {form_currency} (совпадает: {currency_match})")
                 self.logger.debug(f"  Адрес: {parsed_tx['to_address'][:10]}... vs {wallet_address_lower[:10]}... (совпадает: {address_match})")
                 self.logger.debug(f"  Подтверждена: {confirmed}")
                 
-                if (amount_diff < 0.0001 and currency_match and address_match and confirmed):
+                if (amount_diff < self.AMOUNT_PRECISION and currency_match and address_match and confirmed):
                     if self._validate_transaction_fast(parsed_tx):
                         self.logger.info(f"✅ Найден подходящий платеж для формы {form_id}!")
                         self._process_payment(parsed_tx, form_id)
@@ -1046,7 +1083,7 @@ class PaymentProcessor:
                     self.logger.debug(f"❌ Транзакция {tx_hash[:16]} не подходит для формы {form_id}")
                     if not confirmed:
                         self.logger.debug(f"   Причина: транзакция не подтверждена")
-                    if amount_diff >= 0.0001:
+                    if amount_diff >= self.AMOUNT_PRECISION:
                         self.logger.debug(f"   Причина: разница в суммах {amount_diff}")
                     if not currency_match:
                         self.logger.debug(f"   Причина: не совпадает валюта")
@@ -1079,9 +1116,11 @@ class PaymentProcessor:
                     decimals = int(raw_decimals)
                     if decimals < 0 or decimals > 30:
                         return None
-                    amount = float(amount_str)
+                    amount = Decimal(str(amount_str))
+                    if not amount.is_finite():
+                        return None
                     if decimals > 0:
-                        amount = amount / (10 ** decimals)
+                        amount = amount / (Decimal(10) ** decimals)
                 except (ValueError, TypeError, OverflowError):
                     return None
                 
@@ -1092,6 +1131,12 @@ class PaymentProcessor:
                     or ''
                 )
                 
+                tx_confirmations = tx_data.get('confirmations')
+                try:
+                    tx_confirmations = int(tx_confirmations) if tx_confirmations is not None else None
+                except (ValueError, TypeError):
+                    tx_confirmations = None
+                
                 return {
                     'transaction_id': tx_id,
                     'from_address': from_addr,
@@ -1100,6 +1145,7 @@ class PaymentProcessor:
                     'currency': symbol,
                     'timestamp': timestamp * 1000 if timestamp < 1000000000000 else timestamp,
                     'confirmed': tx_data.get('confirmed', True),
+                    'confirmations': tx_confirmations,
                     'trc20_transfer': {
                         'contract_address': contract_address,
                         'tokenInfo': token_info
@@ -1155,9 +1201,12 @@ class PaymentProcessor:
             self.logger.debug(f"📄 Транзакция {tx_id[:16]} неверный USDT контракт")
             return False
         
-        tx_amount = transaction['amount']
-        form_amount = form_data['amount'] 
-        amount_match = abs(tx_amount - form_amount) < 0.0001
+        tx_amount = self._to_decimal(transaction.get('amount'))
+        form_amount = self._to_decimal(form_data.get('amount'))
+        if tx_amount is None or form_amount is None:
+            self.logger.debug(f"❌ Некорректная сумма в транзакции {tx_id[:16]} или форме {form_id[:8]}")
+            return False
+        amount_match = abs(tx_amount - form_amount) < self.AMOUNT_PRECISION
         
         tx_currency = transaction['currency']
         form_currency = form_data['currency']
