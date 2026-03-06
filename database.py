@@ -247,8 +247,9 @@ class DatabaseManager:
             for idx in range(0, len(normalized_ids), chunk_size):
                 chunk = normalized_ids[idx:idx + chunk_size]
                 placeholders = ','.join('?' for _ in chunk)
+                # Safe here: placeholders are generated as '?' only, tx ids are passed via bound params.
                 cursor.execute(
-                    f'SELECT transaction_id FROM transactions WHERE transaction_id IN ({placeholders})',
+                    f'SELECT transaction_id FROM transactions WHERE transaction_id IN ({placeholders})',  # nosec
                     chunk
                 )
                 existing_ids.update(row[0] for row in cursor.fetchall())
