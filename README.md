@@ -7,8 +7,8 @@
 [![Performance](https://img.shields.io/badge/performance-optimized-blue.svg)](#performance)
 [![TRON](https://img.shields.io/badge/TRON-USDT%20TRC20-orange.svg)](https://tron.network/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot%20Ready-blue.svg)](https://telegram.org/)
-[![Stars](https://img.shields.io/github/stars/KALILO646/tron-payment-processor?style=social)](https://github.com/KALILO646/tron-payment-processor)
-[![Forks](https://img.shields.io/github/forks/KALILO646/tron-payment-processor?style=social)](https://github.com/KALILO646/tron-payment-processor)
+[![Stars](https://img.shields.io/github/stars/avokadni/tron-payment-processor?style=social)](https://github.com/KALILO646/tron-payment-processor)
+[![Forks](https://img.shields.io/github/forks/avokadni/tron-payment-processor?style=social)](https://github.com/KALILO646/tron-payment-processor)
 
 
 > 🚀 **Модуль для приема USDT (TRC20) платежей в Telegram ботах с автоматическим мониторингом, генерацией QR-кодов и защитой от мошенничества**
@@ -48,7 +48,7 @@
 
 1. Скачайте или клонируйте модуль в ваш проект
 ```bash
-git clone https://github.com/KALILO646/tron-payment-processor
+git clone https://github.com/avokadni/tron-payment-processor
 cd tron-payment-processor
 ```
 2. Установите необходимые зависимости:
