@@ -7,8 +7,8 @@
 [![Performance](https://img.shields.io/badge/performance-optimized-blue.svg)](#performance)
 [![TRON](https://img.shields.io/badge/TRON-USDT%20TRC20-orange.svg)](https://tron.network/)
 [![Telegram](https://img.shields.io/badge/Telegram-Bot%20Ready-blue.svg)](https://telegram.org/)
-[![Stars](https://img.shields.io/github/stars/avokadni/tron-payment-processor?style=social)](https://github.com/KALILO646/tron-payment-processor)
-[![Forks](https://img.shields.io/github/forks/avokadni/tron-payment-processor?style=social)](https://github.com/KALILO646/tron-payment-processor)
+[![Stars](https://img.shields.io/github/stars/avokadni/tron-payment-processor?style=social)](https://github.com/avokadni/tron-payment-processor)
+[![Forks](https://img.shields.io/github/forks/avokadni/tron-payment-processor?style=social)](https://github.com/avokadni/tron-payment-processor)
 
 
 > 🚀 **Модуль для приема USDT (TRC20) платежей в Telegram ботах с автоматическим мониторингом, генерацией QR-кодов и защитой от мошенничества**
@@ -404,6 +404,36 @@ print(f"Активных форм: {len(active_forms)}")
 transactions = processor.tronscan.get_account_transactions(processor.wallet_address, limit=10)
 print(f"Последних транзакций: {len(transactions)}")
 ```
+
+## CI/CD (Hard Gates)
+
+В репозитории настроен жесткий CI pipeline (`.github/workflows/ci.yml`) с обязательными проверками:
+
+- `lint` - `ruff check .`
+- `typecheck` - `mypy --config-file pyproject.toml`
+- `tests` - `pytest` + coverage gate (`>=80%`)
+- `security` - `bandit` + `pip-audit`
+
+### Required checks для merge в `main`
+
+Для автоматического применения branch protection добавлен workflow:
+
+- `.github/workflows/enforce-required-checks.yml`
+- скрипт: `scripts/enforce_branch_protection.sh`
+
+Что нужно сделать один раз в GitHub:
+
+1. Создать секрет репозитория `GH_ADMIN_TOKEN` (PAT с правами администратора репозитория).
+2. Запустить workflow `Enforce Required Checks` вручную (`workflow_dispatch`).
+
+После этого merge в `main` будет требовать прохождение проверок:
+
+- `lint`
+- `typecheck`
+- `tests`
+- `security`
+
+и минимум 1 approve review + актуальные статусы (strict checks).
 
 ## Лицензия
 

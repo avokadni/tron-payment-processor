@@ -1,0 +1,32 @@
+name: Enforce Required Checks
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/enforce-required-checks.yml"
+      - "scripts/enforce_branch_protection.sh"
+
+permissions:
+  contents: read
+
+jobs:
+  enforce-main-branch-protection:
+    name: enforce-required-checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Apply Branch Protection
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          BRANCH_NAME: main
+        run: |
+          chmod +x scripts/enforce_branch_protection.sh
+          scripts/enforce_branch_protection.sh

@@ -1,0 +1,41 @@
+[tool.pytest.ini_options]
+addopts = "-ra --strict-markers --strict-config --maxfail=1 --disable-warnings --cov=. --cov-report=term-missing --cov-report=xml --cov-fail-under=80"
+testpaths = ["test_crypto_module.py"]
+
+[tool.coverage.run]
+branch = true
+source = ["."]
+omit = [
+  "test_*.py",
+  "simple_example.py",
+]
+
+[tool.coverage.report]
+skip_covered = true
+show_missing = true
+precision = 2
+fail_under = 80
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+exclude = ["__pycache__"]
+
+[tool.ruff.lint]
+select = [
+  "E9",
+  "F63",
+  "F7",
+  "F82",
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["database.py", "payment_processor.py", "tronscan_api.py", "qr_generator.py"]
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+pretty = true

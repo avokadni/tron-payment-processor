@@ -3,8 +3,9 @@ import os
 import tempfile
 import time
 import uuid
+from decimal import Decimal
 from collections import deque
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from datetime import datetime, timedelta
 
 from database import DatabaseManager
@@ -63,7 +64,7 @@ class TestDatabaseManager:
         assert result is True
         form = self.db.get_payment_form(form_id)
         assert form is not None
-        assert form['amount'] == 100.0
+        assert form['amount'] == Decimal('100.0000')
         assert form['currency'] == "USDT"
         assert form['status'] == "pending"
     
@@ -357,8 +358,8 @@ class TestPaymentProcessor:
         )
         
         assert 'form_id' in form
-        assert form['amount'] > 100.0
-        assert form['original_amount'] == 100.0
+        assert form['amount'] > Decimal('100.0')
+        assert form['original_amount'] == Decimal('100.0')
         assert form['currency'] == "USDT"
         assert form['status'] == "pending"
     
@@ -376,14 +377,14 @@ class TestPaymentProcessor:
             )
     
     def test_unique_amount_generation(self):
-        base_amount = 100.0
+        base_amount = Decimal('100.0')
         currency = "USDT"
         
         amounts = set()
         for _ in range(10):
             unique_amount = self.processor._generate_unique_amount(base_amount, currency)
             assert unique_amount >= base_amount
-            assert unique_amount < base_amount + 1.0
+            assert unique_amount < base_amount + Decimal('1.0')
             amounts.add(unique_amount)
         
         assert len(amounts) == 10
@@ -423,7 +424,8 @@ class TestPaymentProcessor:
         
         self.processor.monitoring = True
         try:
-            matched = self.processor._check_form_against_transactions_optimized(form, new_transactions)
+            with patch.object(self.processor, '_validate_sender_address', return_value=True):
+                matched = self.processor._check_form_against_transactions_optimized(form, new_transactions)
         finally:
             self.processor.monitoring = False
         
@@ -468,7 +470,7 @@ class TestPaymentProcessor:
         with patch('payment_processor.secrets.randbelow', return_value=9998):
             form = self.processor.create_payment_form(amount=1.0, currency="USDT")
         
-        assert form['amount'] <= 1.0
+        assert form['amount'] <= Decimal('1.0')
     
     def test_api_rate_limit_prefers_api_requests_per_minute(self):
         os.environ['API_RATE_LIMIT'] = '15'
