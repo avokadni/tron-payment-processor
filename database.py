@@ -6,7 +6,7 @@ import queue
 import contextlib
 import time
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Set
 from decimal import Decimal, InvalidOperation
 
 class DatabaseManager:
@@ -146,6 +146,14 @@ class DatabaseManager:
                     wallet_address TEXT NOT NULL
                 )
             ''')
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS monitor_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_form_id ON payment_forms(form_id)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_form_status ON payment_forms(status)')
@@ -167,6 +175,85 @@ class DatabaseManager:
                     pass
             
             conn.commit()
+
+    def get_monitor_state(self, state_key: str) -> Optional[str]:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    'SELECT state_value FROM monitor_state WHERE state_key = ? LIMIT 1',
+                    (state_key,)
+                )
+                row = cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            self.logger.error(f"Ошибка при чтении monitor_state ({state_key}): {e}")
+            return None
+
+    def set_monitor_state(self, state_key: str, state_value: str) -> bool:
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO monitor_state (state_key, state_value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        state_value = excluded.state_value,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (state_key, state_value))
+                conn.commit()
+                return True
+        except Exception as e:
+            self.logger.error(f"Ошибка при записи monitor_state ({state_key}): {e}")
+            return False
+
+    def set_monitor_state_max_int(self, state_key: str, state_value: int) -> bool:
+        try:
+            normalized_value = int(state_value)
+        except (ValueError, TypeError):
+            self.logger.error(f"Некорректное целочисленное значение monitor_state ({state_key}): {state_value}")
+            return False
+
+        try:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO monitor_state (state_key, state_value, updated_at)
+                    VALUES (?, ?, CURRENT_TIMESTAMP)
+                    ON CONFLICT(state_key) DO UPDATE SET
+                        state_value = CASE
+                            WHEN CAST(excluded.state_value AS INTEGER) > CAST(monitor_state.state_value AS INTEGER)
+                            THEN excluded.state_value
+                            ELSE monitor_state.state_value
+                        END,
+                        updated_at = CURRENT_TIMESTAMP
+                ''', (state_key, str(normalized_value)))
+                conn.commit()
+                return True
+        except Exception as e:
+            self.logger.error(f"Ошибка при max-записи monitor_state ({state_key}): {e}")
+            return False
+
+    def get_existing_transaction_ids(self, transaction_ids: List[str]) -> Set[str]:
+        normalized_ids = [tx_id for tx_id in transaction_ids if isinstance(tx_id, str) and tx_id]
+        if not normalized_ids:
+            return set()
+
+        existing_ids: Set[str] = set()
+        chunk_size = 500
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            for idx in range(0, len(normalized_ids), chunk_size):
+                chunk = normalized_ids[idx:idx + chunk_size]
+                placeholders = ','.join('?' for _ in chunk)
+                cursor.execute(
+                    f'SELECT transaction_id FROM transactions WHERE transaction_id IN ({placeholders})',
+                    chunk
+                )
+                existing_ids.update(row[0] for row in cursor.fetchall())
+
+        return existing_ids
     
     def create_payment_form(self, form_id: str, amount: Any, currency: str, 
                           description: str, wallet_address: str, expires_hours: int = None) -> bool:

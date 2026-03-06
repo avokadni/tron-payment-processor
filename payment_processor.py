@@ -58,6 +58,7 @@ class PaymentProcessor:
     AMOUNT_PRECISION = Decimal('0.0001')
     AMOUNT_SIMILARITY_THRESHOLD = Decimal('0.01')
     MAX_TOKEN_DECIMALS = 30
+    MONITOR_LAST_BLOCK_STATE_KEY = "monitor.last_block_timestamp"
     
     def __init__(self, log_level: str = None):
         self.logger = logging.getLogger(__name__)
@@ -92,11 +93,9 @@ class PaymentProcessor:
             self.payment_callbacks = {}
             self._form_creation_lock = threading.Lock()
             self._last_form_creation_time = 0
-            self._processed_transactions = set()
-            self._max_processed_transactions = 10000
             self._processing_transactions = set()
             self._transaction_cache_lock = threading.Lock()
-            self._last_block_timestamp = 0
+            self._last_block_timestamp = self._load_last_block_timestamp()
             self._form_cache = {}
             self._form_cache_lock = threading.Lock()
             self._cache_expiry = int(os.getenv('CACHE_EXPIRY_SECONDS', 300))
@@ -153,6 +152,27 @@ class PaymentProcessor:
         if value is None:
             raise ValueError(f"Некорректное значение {key}: {raw_value}")
         return value
+
+    def _load_last_block_timestamp(self) -> int:
+        try:
+            raw_value = self.db.get_monitor_state(self.MONITOR_LAST_BLOCK_STATE_KEY)
+            if raw_value is None:
+                return 0
+            timestamp = self._normalize_tx_timestamp(raw_value)
+            if timestamp > 0:
+                self.logger.info(f"Восстановлен checkpoint мониторинга: {timestamp}")
+            return timestamp
+        except Exception as e:
+            self.logger.warning(f"Не удалось загрузить checkpoint мониторинга: {e}")
+            return 0
+
+    def _persist_last_block_timestamp(self, timestamp: int) -> None:
+        normalized_timestamp = self._normalize_tx_timestamp(timestamp)
+        if normalized_timestamp <= 0:
+            return
+        saved = self.db.set_monitor_state_max_int(self.MONITOR_LAST_BLOCK_STATE_KEY, normalized_timestamp)
+        if not saved:
+            self.logger.warning(f"Не удалось сохранить checkpoint мониторинга: {normalized_timestamp}")
     
     def _validate_env_vars(self):
         wallet = os.getenv('WALLET_ADDRESS')
@@ -933,31 +953,28 @@ class PaymentProcessor:
     
     def _filter_new_transactions(self, transactions: List[Dict]) -> List[Dict]:
         with self._transaction_cache_lock:
-            new_transactions = []
+            deduplicated_transactions: List[Dict] = []
             seen_in_batch = set()
             for tx in transactions:
                 tx_hash = tx.get('hash', '')
-                if not tx_hash:
-                    continue
-                
-                if tx_hash in seen_in_batch:
+                if not tx_hash or tx_hash in seen_in_batch:
                     continue
                 seen_in_batch.add(tx_hash)
-                
-                if tx_hash in self._processed_transactions:
-                    self.logger.debug(f"⏭️ Транзакция уже обработана: {tx_hash[:16]}")
-                    continue
-                
-                new_transactions.append(tx)
-                self.logger.debug(f"🆕 Новая транзакция: {tx_hash[:16]}")
-            
-            if len(self._processed_transactions) > self._max_processed_transactions:
-                oldest_txs = list(self._processed_transactions)[:5000]
-                for tx_hash in oldest_txs:
-                    self._processed_transactions.discard(tx_hash)
-                self.logger.info(f"🧹 Очищен кэш: удалено {len(oldest_txs)} старых транзакций")
-                        
-            return new_transactions
+                deduplicated_transactions.append(tx)
+
+        tx_hashes = [tx.get('hash', '') for tx in deduplicated_transactions]
+        processed_hashes = self.db.get_existing_transaction_ids(tx_hashes)
+
+        new_transactions: List[Dict] = []
+        for tx in deduplicated_transactions:
+            tx_hash = tx.get('hash', '')
+            if tx_hash in processed_hashes:
+                self.logger.debug(f"⏭️ Транзакция уже обработана (persisted): {tx_hash[:16]}")
+                continue
+            new_transactions.append(tx)
+            self.logger.debug(f"🆕 Новая транзакция: {tx_hash[:16]}")
+
+        return new_transactions
     
     def _cleanup_cache(self):
         with self._form_cache_lock:
@@ -989,6 +1006,7 @@ class PaymentProcessor:
             )
             if max_timestamp > self._last_block_timestamp:
                 self._last_block_timestamp = max_timestamp
+                self._persist_last_block_timestamp(max_timestamp)
     
     def _normalize_tx_timestamp(self, timestamp: Any) -> int:
         try:
@@ -1048,7 +1066,6 @@ class PaymentProcessor:
                         continue
                     
                     if self.db.get_transaction_by_id(tx_hash):
-                        self._processed_transactions.add(tx_hash)
                         continue
                 
                 parsed_tx = self._parse_transaction_fast(tx)
